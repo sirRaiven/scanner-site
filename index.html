@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b3721">
+<meta name="referrer" content="no-referrer">
+<title>SNCBT · Scan QR</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0b3721;background:#f5f8f4}
+*{box-sizing:border-box}body{margin:0;padding:clamp(12px,4vw,32px);min-height:100svh;display:flex;align-items:center;justify-content:center}
+main{width:min(100%,530px);background:white;border:1px solid #d9e5dc;border-radius:23px;padding:clamp(18px,5vw,30px);box-shadow:0 14px 45px #0b372115}
+.top{font-size:.74rem;letter-spacing:.15em;text-transform:uppercase;color:#347554;font-weight:750}h1{font-size:clamp(1.6rem,5vw,2.2rem);margin:.4rem 0}.sub{color:#557167;line-height:1.5;margin:0 0 18px}
+.frame{position:relative;background:#17251e;border-radius:16px;overflow:hidden;aspect-ratio:3/4;max-height:57svh;display:flex;align-items:center;justify-content:center}
+video{width:100%;height:100%;object-fit:cover}.corners{position:absolute;inset:22%;border:4px solid #d4ae47;border-radius:14px;pointer-events:none;box-shadow:0 0 0 999px #0003}
+.status{min-height:3em;margin:16px 0 12px;line-height:1.45;font-size:.95rem}button{width:100%;background:#165a37;color:white;font:inherit;border:0;border-radius:12px;min-height:48px;font-weight:700;cursor:pointer;margin-top:8px}button:focus-visible{outline:3px solid #d7b34f;outline-offset:3px}
+.secondary{background:#eff5ef;color:#0b3721;border:1px solid #cbdfce}.hint{font-size:.82rem;color:#597065;line-height:1.5;margin:14px 0 0}
+</style>
+<!-- Pin the version. QR images are processed locally in this browser; they are never uploaded. -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="top">SNCBT · Office of Student Affairs</div>
+  <h1>Scan QR code</h1>
+  <p class="sub" id="intro">Point your camera at the QR code to continue.</p>
+  <div class="frame"><video id="preview" autoplay muted playsinline aria-label="Camera preview"></video><div class="corners" aria-hidden="true"></div></div>
+  <div class="status" id="status" role="status" aria-live="polite">Tap Start scanner. Your browser will ask to use your camera once.</div>
+  <button type="button" id="start">Start scanner</button>
+  <button type="button" id="back" class="secondary">Back to SNCBT</button>
+  <p class="hint">Camera preview stays on your device. Only the QR result is sent back to SNCBT for verification.</p>
+</main>
+<script>
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id);
+const query=new URLSearchParams(location.search);
+const mode=query.get('mode')==='pass'?'pass':'invite';
+const nonce=query.get('nonce')||'';
+const origin=query.get('origin')||'';
+// Only trust a deployment URL supplied by the SNCBT web app.
+const app=(()=>{try{const u=new URL(query.get('app')||'');return u.protocol==='https:' && u.hostname==='script.google.com' && /^\/macros\/s\/[^/]+\/(exec|dev)$/.test(u.pathname) ? u : null;}catch(_){return null;}})();
+const originIsValid=(()=>{try {const u=new URL(origin);return u.protocol==='https:'&&(u.hostname==='script.google.com'||u.hostname.endsWith('.googleusercontent.com'));}catch(_){return false;}})();
+$('intro').textContent=mode==='pass'?'Scan the student’s temporary pass QR code.':'Scan the check-in QR given by OSA staff.';
+if(!app){$('status').textContent='The scanner is not linked to SNCBT yet. Please reopen it from your account.';$('start').disabled=true;}
+let stream=null,live=false,request=0,last=0,busy=false;
+const canvas=document.createElement('canvas');const ctx=canvas.getContext('2d',{willReadFrequently:true});
+function info(text){$('status').textContent=text;}
+function stop(){live=false;if(request)cancelAnimationFrame(request);request=0;if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}const v=$('preview');v.pause();v.srcObject=null;}
+function normalize(raw){
+  let url;try{url=new URL(String(raw||''));}catch(_){return null;}
+  if(!app||url.protocol!=='https:'||url.hostname!=='script.google.com'||url.pathname!==app.pathname)return null;
+  const value=url.searchParams.get(mode==='invite'?'invite':'verify')||'';
+  const valid=mode==='invite'?/^[a-f0-9]{64}$/i.test(value):/^[a-f0-9-]{36}\.[a-f0-9]{64}$/i.test(value);
+  return valid?{url:url.href,code:value.toLowerCase()}:null;
+}
+function finish(result){
+  stop();info('QR scanned. Returning to SNCBT…');
+  let sent=false;
+  if(originIsValid&&window.opener&&!window.opener.closed&&nonce.length>=20){
+    try{window.opener.postMessage({type:'SNCBT_QR_SCAN',mode,code:result.code,nonce},origin);sent=true;}catch(_){}
+  }
+  // Without an opener (some mobile browsers), return to the verified SNCBT
+  // deployment only. Never trust a redirect location supplied by the QR.
+  if(sent){setTimeout(()=>{try{window.close();}catch(_){}},350);}
+  else {
+    // If mobile browsers remove window.opener, return ONLY to the trusted
+    // deployment. Never navigate to an arbitrary URL encoded inside the QR.
+    const back=new URL(app.href);
+    back.searchParams.set(mode==='invite'?'invite':'verify',result.code);
+    setTimeout(()=>location.replace(back.href),350);
+  }
+}
+async function start(){
+ if(!app){info('Scanner setup is incomplete. Please reopen it from SNCBT.');return;}
+ if(!navigator.mediaDevices?.getUserMedia){info('This browser cannot open the camera. Please use your phone’s Camera app to scan the OSA QR.');return;}
+ stop();$('start').disabled=true;info('Opening camera…');
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'}}});
+  const video=$('preview');video.srcObject=stream;await video.play();live=true;info('Align the QR inside the frame. Scanning is automatic.');
+  let detector=null;
+  if('BarcodeDetector' in window){try{detector=new BarcodeDetector({formats:['qr_code']});}catch(_){}}
+  if(!detector&&typeof window.jsQR!=='function'){throw new Error('QR reader could not load. Reopen this page while connected to the internet.');}
+  async function tick(now){
+   if(!live)return;request=requestAnimationFrame(tick);
+   if(busy||now-last<180||video.readyState<2)return;last=now;busy=true;
+   try{
+    const w=Math.min(720,video.videoWidth||720),h=Math.max(1,Math.round(w*(video.videoHeight||540)/(video.videoWidth||720)));
+    canvas.width=w;canvas.height=h;ctx.drawImage(video,0,0,w,h);
+    let raw='';if(detector){try{const hits=await detector.detect(canvas);raw=hits[0]?.rawValue||'';}catch(_){}}
+    if(!raw&&typeof window.jsQR==='function'){const pixels=ctx.getImageData(0,0,w,h);raw=window.jsQR(pixels.data,w,h,{inversionAttempts:'attemptBoth'})?.data||'';}
+    if(raw){const valid=normalize(raw);if(valid)finish(valid);else info('This is not the expected SNCBT QR code. Please try another.');}
+   }catch(_){/* A blurred frame should not stop the scanner. */}
+   finally{busy=false;}
+  }
+  request=requestAnimationFrame(tick);
+ }catch(e){stop();$('start').disabled=false;info(e.name==='NotAllowedError'?'Camera access wasn’t granted. Select Start scanner to try again.':e.message||'Could not start camera.');}
+}
+$('start').addEventListener('click',start);
+// Only one tap in the original app is needed on supported browsers.
+// The button is available if the browser requires an additional gesture.
+if(app){
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});
+  else start();
+}
+$('back').addEventListener('click',()=>{stop();if(window.opener&&!window.opener.closed){window.close();}else if(app){location.replace(app.href);}else{history.back();}});
+window.addEventListener('pagehide',stop);
+})();
+</script>
+</body>
+</html>
